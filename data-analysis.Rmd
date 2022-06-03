@@ -1,0 +1,266 @@
+---
+title: "TFM Marc Ruiz"
+output: html_document
+---
+Aquest fitxer ha estat confeccionat per a poder aportar rigor a les afirmacions del treball - no està pensat per a generar cap fitxer HTML ni pretén ser una explicació del procés seguit.
+
+```{r}
+data_raw <- read.delim(file='GTEx_Analysis_2017-06-05_v8_RNASeQCv1.1.9_gene_tpm.gct', skip = 2)
+annot <- read.delim(file='GTEx_Analysis_v8_Annotations_SampleAttributesDS.txt')
+annot <- annot[annot$SMTS=='Brain', c('SAMPID', 'SMTS', 'SMTSD')]
+annot$SMTSD <- substring(annot$SMTSD, 9) # Ens desfem de 'Brain - ' a cada fila per netedat
+
+# a annot els noms estan escrits amb '-' i a data amb '.' 
+annot$SAMPID <- gsub('-', '.', annot$SAMPID)
+brain_tissue_codes <- annot$SAMPID
+
+rownames(data_raw) <- data_raw$Name
+data <- data_raw[names(data_raw) %in% brain_tissue_codes]
+
+tissue_groups <- unique(annot$SMTSD) # N'hi ha 13
+```
+
+```{r}
+#Creem un df resum dels teixits
+tissues <- data.frame(matrix(ncol = length(tissue_groups), nrow = nrow(data)))
+colnames(tissues) <- tissue_groups
+rownames(tissues) <- rownames(data)
+
+for(tissue in tissue_groups){
+  subset <- data[names(data) %in% annot$SAMPID[annot$SMTSD == tissue]]
+  tissues[tissue] <- rowMeans(subset)
+}
+```
+
+```{r}
+# Fem un df dels agregats de cada teixit
+log_tissues <- data.frame(matrix(ncol = length(tissue_groups), nrow = nrow(data)))
+colnames(log_tissues) <- tissue_groups
+expr <- data.frame(matrix(NA, nrow = 13, ncol = 3))
+colnames(expr) <- c('Regió', '# gens expressats', 'Proporció de gens expressats (%)')
+count <- data.frame(matrix(ncol = length(tissue_groups), nrow=1))
+colnames(count) <- tissue_groups
+rownames(count) <- 'mostres'
+i = 1
+
+for(tissue in tissue_groups){
+    subset <- data[names(data) %in% annot$SAMPID[annot$SMTSD == tissue]]
+    
+    num_expressed_genes <- nrow(subset[rowMeans(subset) > 1, ])
+    proportion <- 100*round(num_expressed_genes / 56200, digits=3)
+    expr[i, ] <- c(tissue, num_expressed_genes, paste(toString(proportion), '%'))
+    i <- i+1
+    
+	  log_tissues[tissue] <- log(rowSums(subset))
+	  count[tissue] <- ncol(subset)
+}
+
+count <- t(count)
+```
+
+
+```{r}
+plot_everything_tiff <- function(filename, n=7, m=2){
+  tiff(filename=filename,
+       res = 300,
+       width = 21, height = 26, units = 'in',
+       compression = c('lzw'))
+  par(mfrow=c(n,m))
+  for (tissue in names(log_tissues)){
+    hist(log_tissues[, tissue], col = 'lightblue', main = tissue, xlab = NULL, cex.main=2)
+  }
+  dev.off()
+}
+```
+
+```{r}
+plot_everything_jpeg <- function(filename, n=7, m=2){
+  jpeg(filename=filename,
+       res = 300, 
+       width = 21, height = 26, units = 'in')
+  par(mfrow=c(n,m))
+  for (tissue in names(log_tissues)){
+    hist(log_tissues[, tissue], col = 'lightblue', main = tissue, xlab = NULL, cex.main=2)
+  }
+  dev.off()
+}
+```
+
+```{r}
+# GWAS
+filen <- 'gwas-association-downloaded_2022-04-20-EFO_1001870-withChildTraits.tsv'
+gwas <- read.csv(filen, sep = "\t")
+```
+
+```{r}
+# agafar tots els gens relacionats amb l'AD
+ad_genes <- character(0)
+
+ad_genes <- gwas$UPSTREAM_GENE_ID[gwas$UPSTREAM_GENE_ID != '']
+ad_genes <- c(ad_genes, gwas$DOWNSTREAM_GENE_ID[gwas$DOWNSTREAM_GENE_ID != ''])
+
+prov_snp <- gwas$SNP_GENE_IDS[gwas$SNP_GENE_IDS != '']
+
+
+for(i in 1:length(prov_snp)){
+  ad_genes <- c(ad_genes, strsplit(prov_snp[i], ', ')[[1]])
+}
+
+ad_genes <- unique(ad_genes)
+```
+
+```{r}
+# Arreglem els rownames
+cropped_rownames <- character(0)
+for(i in 1:nrow(tissues)){
+  cropped_rownames[i] <- strsplit(rownames(tissues)[i], "\\.")[[1]][1]
+}
+
+# Amb un View(duplicated(cropped_rownames)) és fàcil veure els índexos:
+dup_ind <- c(55604:55637, 56154:56163)
+
+# Alguns s'han solapat, però no és problema 
+length(cropped_rownames) - length(unique(cropped_rownames)) # no és 0
+# perquè cap d'aquests gens afecta a l'AD:
+length(intersect(cropped_rownames[dup_ind], ad_genes)) # és 0
+
+tissues <- tissues[-dup_ind,]
+rownames(tissues) <- cropped_rownames[-dup_ind]
+
+ad_tissues <- tissues[ad_genes,]
+# Podem tenir gens que sabem que estan relacionats amb l'AD pero dels que no
+# tenim dades, els hem d'eliminar
+ad_tissues <- na.omit(ad_tissues)
+
+non_zero = apply(ad_tissues, 1, function(row) all(row != 0))
+ad_tissues <- ad_tissues[non_zero,]
+```
+
+```{r}
+# Comparativa d'expressió
+cmeans <- colMeans(ad_tissues)
+
+comparison <- data.frame(matrix(ncol = 1, nrow = 13))
+colnames(comparison) <- c('Sobreexpressió')
+rownames(comparison) <- tissue_groups
+
+for(i in 1:length(cmeans)){
+  this_tissue <- log(cmeans[tissue_groups[i]])
+  other_tissues <- log(mean(cmeans[tissue_groups[-i]]))
+  
+  comparison[tissue_groups[i], 1] <- this_tissue - other_tissues
+}
+```
+
+
+```{r}
+# Comparativa de TOTS els gens, és normal que sigui tot 0
+cmeans_all <- colMeans(tissues)
+comparison_all <- data.frame(matrix(ncol = 1, nrow = 13))
+colnames(comparison_all) <- c('Sobreexpressió tots els gens')
+rownames(comparison_all) <- tissue_groups
+for(i in 1:length(cmeans_all)){
+   this_tissue <- log(cmeans_all[tissue_groups[i]])
+   other_tissues <- log(mean(cmeans_all[tissue_groups[-i]]))
+   
+   comparison_all[tissue_groups[i], 1] <- this_tissue - other_tissues
+}
+#View(comparison_all)
+#View(cmeans_all)
+```
+
+```{r}
+# Com de probable és tenir una sobreexpressió com la dels genes_ad?
+# Triga ~30min
+maxiter = 1000000
+subset_len = length(ad_genes)
+sobreexp <- data.frame(matrix(0, ncol = 1, nrow = 13))
+colnames(sobreexp) <- c(paste('Sobreexpressió mitjana @', as.character(maxiter)))
+rownames(sobreexp) <- tissue_groups
+
+for(k in 1:maxiter){
+  subset <- tissues[sample(nrow(tissues), subset_len), ]
+  cmeans_subset <- colMeans(subset)
+  for(i in 1:length(cmeans_subset)){
+    this_tissue <- log(cmeans_subset[tissue_groups[i]])
+    other_tissues <- log(mean(cmeans_subset[tissue_groups[-i]]))
+    
+    # Vaig acumulant la sobreexpressió
+    previous <- sobreexp[tissue_groups[i], 1]
+    sobreexp[tissue_groups[i], 1] <- previous + this_tissue - other_tissues
+  }
+}
+
+sobreexp[, 1] <- sobreexp[, 1] / maxiter
+sobreexp$AD <- comparison[, 1]
+```
+
+```{r}
+# Tractem els dos teixits més destacats:
+hippocampus <- data[names(data) %in% annot$SAMPID[annot$SMTSD == 'Hippocampus']]
+hippocampus <- hippocampus[-dup_ind,]
+rownames(hippocampus) <- cropped_rownames[-dup_ind]
+hippocampus <- hippocampus[ad_genes,]
+hippocampus <- na.omit(hippocampus)
+hippocampus <- hippocampus[non_zero,]
+hippocampus <- t(hippocampus)
+
+cormat_hippo <- cor(hippocampus)
+
+library(reshape2)
+library(dplyr)
+# Posem un valor fàcil de trobar per a després descartar el triangle superior
+cormat_hippo[upper.tri(cormat_hippo)] <- 42
+hippo_df <- melt(cormat_hippo)
+
+# head(hippo_df)
+# dim(hippo_df)
+
+hippo_df <- filter(hippo_df, value != 42) %>% filter(Var1 != Var2)
+
+# dim(hippo_df)
+# summary(hippo_df)
+
+hippo_adj <- hippo_df %>% filter(value > 0.95)
+names(hippo_adj) <- c('from', 'to', 'weight')
+# dim(hippo_adj)
+
+write.csv(hippo_adj, 'hippocampus_adj.csv', row.names=FALSE)
+```
+
+```{r}
+hemi <- data[names(data) %in% annot$SAMPID[annot$SMTSD == 'Cerebellar Hemisphere']]
+hemi <- hemi[-dup_ind,]
+rownames(hemi) <- cropped_rownames[-dup_ind]
+hemi <- hemi[ad_genes,]
+hemi <- na.omit(hemi)
+hemi <- hemi[non_zero,]
+hemi <- t(hemi)
+
+cormat_hemi <- cor(hemi)
+
+cormat_hemi[upper.tri(cormat_hemi)] <- 42
+hemi_df <- melt(cormat_hemi)
+
+hemi_df <- filter(hemi_df, value != 42) %>% filter(Var1 != Var2)
+
+hemi_adj <- hemi_df %>% filter(value > 0.95)
+names(hemi_adj) <- c('from', 'to', 'weight')
+
+write.csv(hemi_adj, 'cerebellar-hemisphere_adj.csv', row.names=FALSE)
+```
+
+
+```{r}
+library(corrplot)
+rounded_hippo <- round(cor(hippo), 3)
+rounded_hemi <- round(cor(hemi), 3)
+corrplot(rounded_hippo, method='color', tl.pos='n')
+corrplot(rounded_hemi, method='color', tl.pos='n')
+
+hist(hippo_df$value, main = "Histograma de la correlació de l\'hipocamp", xlab='', col = 'lightblue')
+hist(hemi_df$value, main = "Histograma de la correlació de l\'hemisferi cerebel·lar", xlab='', col = 'lightblue')
+```
+
+
+
